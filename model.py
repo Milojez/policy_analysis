@@ -87,20 +87,40 @@ class PolicyNet(nn.Module):
             nn.ReLU(),
         )
 
+        # ── Transformer encoder over signal tokens ──────────────────────────
+        _enc_layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=self.n_heads,
+            dim_feedforward=getattr(config, 'FF_DIM', hidden),
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.signal_transformer = nn.TransformerEncoder(
+            _enc_layer,
+            num_layers=getattr(config, 'N_SIGNAL_LAYERS', 1),
+        )
+
         # ── Multi-head cross-attention pooling ──────────────────────────────
-        self.q_proj = nn.Linear(hidden, hidden)
+        # Conditioned path: query = GRU hidden state (behavioural context)
+        self.q_proj    = nn.Linear(hidden, hidden)
+        self.out_proj  = nn.Linear(hidden, hidden)
+        # Global path: query = learned parameter (pure urgency-driven)
+        self.q_proj_global   = nn.Linear(hidden, hidden)
+        self.out_proj_global = nn.Linear(hidden, hidden)
+        # Shared key/value projections (same signal tokens for both paths)
         self.k_proj = nn.Linear(hidden, hidden)
         self.v_proj = nn.Linear(hidden, hidden)
-        self.out_proj = nn.Linear(hidden, hidden)
 
         self.attn_dropout = nn.Dropout(dropout)
 
-        # Learned global query for signal-only mode
+        # Learned global query (urgency-driven, no fixation bias)
         self.global_query = nn.Parameter(torch.zeros(1, 1, hidden))
         nn.init.normal_(self.global_query, std=0.02)
 
+        # sig_fc fuses both signal summaries [conditioned + global] → hidden
         self.sig_fc = nn.Sequential(
-            nn.Linear(hidden, hidden),
+            nn.Linear(hidden * 2, hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
@@ -178,11 +198,12 @@ class PolicyNet(nn.Module):
         tok_h = self.token_mlp(tok)                              # [B, T, H]
         return tok_h
 
-    def multi_head_cross_attention(self, q, k, v):
+    def multi_head_cross_attention(self, q, k, v, out_proj):
         """
-        q: [B, 1, H]
-        k: [B, T, H]
-        v: [B, T, H]
+        q:        [B, 1, H]
+        k:        [B, T, H]
+        v:        [B, T, H]
+        out_proj: nn.Linear(H, H) — separate per attention path
 
         returns:
             out: [B, H]
@@ -204,7 +225,7 @@ class PolicyNet(nn.Module):
 
         out = torch.matmul(attn, v)                                    # [B, Nh, 1, Dh]
         out = out.transpose(1, 2).contiguous().reshape(B, 1, H)        # [B, 1, H]
-        out = self.out_proj(out).squeeze(1)                            # [B, H]
+        out = out_proj(out).squeeze(1)                                 # [B, H]
 
         # Mean attention across heads for debugging/visualization
         attn_mean = attn.mean(dim=1).squeeze(1)                        # [B, T]
@@ -229,17 +250,24 @@ class PolicyNet(nn.Module):
             return h_sig
 
         tok_h = self.build_signal_tokens(signal)                       # [B, T, H]
+        tok_h = self.signal_transformer(tok_h)                         # [B, T, H]
 
-        if self.use_fixations:
-            q = self.q_proj(h_fix).unsqueeze(1)                        # [B, 1, H]
-        else:
-            q = self.global_query.expand(B, -1, -1)                   # [B, 1, H]
-
+        # K and V are shared between both attention paths
         k = self.k_proj(tok_h)                                         # [B, T, H]
         v = self.v_proj(tok_h)                                         # [B, T, H]
 
-        pooled, attn_flat = self.multi_head_cross_attention(q, k, v)   # [B, H], [B, T]
-        h_sig = self.sig_fc(pooled)                                    # [B, H]
+        # Conditioned path: query from GRU hidden state (behavioural bias)
+        q_cond = self.q_proj(h_fix).unsqueeze(1)                       # [B, 1, H]
+        pooled_cond, attn_flat = self.multi_head_cross_attention(
+            q_cond, k, v, self.out_proj)                               # [B, H], [B, T]
+
+        # Global path: learned query (pure urgency-driven, no fixation bias)
+        q_glob = self.q_proj_global(
+            self.global_query.expand(B, -1, -1))                       # [B, 1, H]
+        pooled_glob, _ = self.multi_head_cross_attention(
+            q_glob, k, v, self.out_proj_global)                        # [B, H]
+
+        h_sig = self.sig_fc(torch.cat([pooled_cond, pooled_glob], dim=-1))  # [B, H]
 
         if return_attention:
             attn_map = attn_flat.reshape(B, F, D)                      # [B, F, 6]

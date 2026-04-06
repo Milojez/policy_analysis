@@ -124,7 +124,9 @@ def generate_scanpath(
     df_sig,
     time_end_arr,
     angle_cols,
+    speed_cols,
     urgency_std,
+    speed_std,
     temporal_stats,
     t_end_video,
     device,
@@ -152,8 +154,10 @@ def generate_scanpath(
             df_sig,
             time_end_arr,
             angle_cols,
+            speed_cols,
             t_current,
             urgency_std,
+            speed_std,
         )
 
         pa_t  = torch.tensor([past],      dtype=torch.long,    device=device)
@@ -187,7 +191,7 @@ def generate_scanpath(
 # ── Plot 2: AOI count fractions ───────────────────────────────────────────────
 
 def compute_aoi_count_fractions(model, gt_df, signal_data,
-                                urgency_std, temporal_stats, device):
+                                urgency_std, speed_std, temporal_stats, device):
     """
     For each participant × test video:
       - Actual: count fixations that start after SIGNAL_LENGTH_S
@@ -209,7 +213,7 @@ def compute_aoi_count_fractions(model, gt_df, signal_data,
             if video not in signal_data:
                 continue
 
-            df_sig, time_end_arr, angle_cols = signal_data[video]
+            df_sig, time_end_arr, angle_cols, speed_cols = signal_data[video]
             t_end_video = float(time_end_arr[-1])
 
             grp = gt_df[(gt_df["pp"] == pp) & (gt_df["video"] == video)]
@@ -224,7 +228,9 @@ def compute_aoi_count_fractions(model, gt_df, signal_data,
                 df_sig,
                 time_end_arr,
                 angle_cols,
+                speed_cols,
                 urgency_std,
+                speed_std,
                 temporal_stats,
                 t_end_video,
                 device,
@@ -302,7 +308,8 @@ def main():
     model = load_best_model(device)
     payload = load_payload()
 
-    urgency_std = payload["urgency_std"]
+    urgency_std    = payload["urgency_std"]
+    speed_std      = payload["speed_std"]
     temporal_stats = payload["temporal_stats"]
 
     os.makedirs(config.RESULTS, exist_ok=True)
@@ -333,18 +340,19 @@ def main():
     for vnum in all_videos:
         loaded = load_signal_csv(vnum)
 
-        if len(loaded) == 4:
+        if len(loaded) == 5:
+            df_sig, _, _, angle_cols, speed_cols = loaded
+        elif len(loaded) == 4:
             df_sig, _, _, angle_cols = loaded
-        elif len(loaded) == 3:
-            df_sig, _, angle_cols = loaded
+            speed_cols = {}
         else:
             raise ValueError(
                 f"Unexpected return format from load_signal_csv({vnum}). "
-                f"Expected 3 or 4 values, got {len(loaded)}."
+                f"Expected 4 or 5 values, got {len(loaded)}."
             )
 
         time_end_arr = df_sig["time_end"].values.astype(np.float64)
-        signal_data[vnum] = (df_sig, time_end_arr, angle_cols)
+        signal_data[vnum] = (df_sig, time_end_arr, angle_cols, speed_cols)
 
     print("Generating scanpaths for all test participants...")
     actual_counts, pred_counts = compute_aoi_count_fractions(
@@ -352,6 +360,7 @@ def main():
         gt_df,
         signal_data,
         urgency_std,
+        speed_std,
         temporal_stats,
         device,
     )

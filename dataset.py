@@ -17,7 +17,7 @@ class PolicyDataset(Dataset):
     Each item:
       past_aois    : LongTensor  [N]       — AOI labels (0=pad, 1-6=dials)
       past_temporal: FloatTensor [N, 2]   — [duration_norm, saccade_norm] per past fixation
-      signal       : FloatTensor [F, 6, 4] — signal features per (frame, dial)
+      signal       : FloatTensor [F, 6, 5] — signal features per (frame, dial)
       label        : LongTensor  []        — next AOI (0-indexed, 0..5)
       temporal     : FloatTensor [2]       — [saccade_norm, duration_norm] for next fixation
 

@@ -101,7 +101,15 @@ def main():
         lr=config.LR,
         weight_decay=config.WEIGHT_DECAY,
     )
-    ce_loss = nn.CrossEntropyLoss()
+    # Class-weighted loss: inverse frequency weighting so rare dials
+    # receive equal gradient pressure as common ones
+    all_labels = train_ds.labels                         # [M]
+    counts = torch.bincount(all_labels, minlength=6).float()
+    class_weights = 1.0 / counts.clamp(min=1)
+    class_weights = class_weights / class_weights.sum() * 6  # mean weight = 1
+    class_weights = class_weights.to(device)
+    print("Class weights:", [f"{w:.3f}" for w in class_weights.tolist()])
+    ce_loss = nn.CrossEntropyLoss(weight=class_weights)
 
     # Cosine annealing after linear warmup
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -152,6 +160,7 @@ def main():
             temp_gt = batch['temporal'].to(device)
 
             optimizer.zero_grad()
+            sig = sig + 0.02 * torch.randn_like(sig)   # signal noise augmentation
             logits, temp_pred = model(pa, sig, pt)
 
             loss_dial = ce_loss(logits, lbl)

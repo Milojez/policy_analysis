@@ -36,18 +36,18 @@ AOI_BY_POSITION = {
 
 # ── Signal sampling ───────────────────────────────────────────────────────────
 SIGNAL_LENGTH_S = 2   # seconds of signal history before next fixation
-SIGNAL_HZ       = 15    # evenly-spaced frames per second to extract
+SIGNAL_HZ       = 10    # evenly-spaced frames per second to extract
 # F = round(SIGNAL_LENGTH_S * SIGNAL_HZ) = 20 total frames per sample
 # number of frames per signal window after sampling
 SIGNAL_FRAMES = int(round(SIGNAL_LENGTH_S * SIGNAL_HZ))
 # ── Model ─────────────────────────────────────────────────────────────────────
-PAST_FIXATIONS = 4       # past fixation AOI labels fed to GRU
+PAST_FIXATIONS = 2       # past fixation AOI labels fed to GRU
 STRIDE         = 1       # samples per (pp, video) advance by this many fixations
                          # STRIDE=1 → consecutive samples share PAST_FIXATIONS-1 context fixations
                          # STRIDE=PAST_FIXATIONS → no overlap (fully non-overlapping windows)
-HIDDEN_DIM     = 128
+HIDDEN_DIM     = 64
 EMB_DIM        = 16      # AOI embedding dimension
-SIG_FEAT       = 4       # signal features per (dial, frame): sin, cos, urgency, distance
+SIG_FEAT       = 5       # signal features per (dial, frame): sin, cos, urgency, distance, speed_norm
 
 # Ablation flags — set False to zero-out that branch (no rebuild needed)
 USE_FIXATIONS = True     # use past fixation AOI history
@@ -56,7 +56,7 @@ USE_SIGNAL    = True     # use recent dial signal history
 # ── Regularisation ────────────────────────────────────────────────────────────
 DROPOUT = 0.2            # dropout probability in fusion MLP
 # Probability of zeroing out past_aois for a training sample (forces signal use)
-FIX_BRANCH_DROPOUT = 0.3
+FIX_BRANCH_DROPOUT = 0.5
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 # Weight of temporal (saccade + duration) MSE loss vs dial CrossEntropy
@@ -73,11 +73,11 @@ WEIGHT_DECAY = 1e-4
 
 # ── Transformer ───────────────────────────────────────────────────────────
 NHEAD = 4
-FF_DIM = HIDDEN_DIM * 2
-N_SIGNAL_LAYERS = 1
+FF_DIM = HIDDEN_DIM        # lean FFN — keeps transformer ~99k params at this data scale
+N_SIGNAL_LAYERS = 1        # one layer sufficient for cross-token interaction
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
-MODEL_NAME = "mhead_strN_policy_h128_n3_s1hz20"
+MODEL_NAME = "policy_h64_n2_str1_fbd05_hz10"
 CKPT_DIR   = os.path.join(_ROOT, "checkpoints", MODEL_NAME)
 CKPT       = os.path.join(CKPT_DIR, "policy_best.pth")
 LOG_PATH   = os.path.join(CKPT_DIR, f"{MODEL_NAME}_log.csv")

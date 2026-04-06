@@ -58,13 +58,18 @@ def load_signal_csv(video_num):
     df = pd.read_csv(path)
     id_to_pos = parse_dial_id_to_pos(df.columns)
     angle_cols = {}
+    speed_cols = {}
     for col in df.columns:
         m = re.match(r'angle_dial_id_(\d+)_pos_(\d+)', col)
         if m:
             pos = int(m.group(2))
             angle_cols[pos] = col
+        m = re.match(r'speed_dial_id_(\d+)_pos_(\d+)', col)
+        if m:
+            pos = int(m.group(2))
+            speed_cols[pos] = col
     positions = sorted(angle_cols.keys())
-    return df, id_to_pos, positions, angle_cols
+    return df, id_to_pos, positions, angle_cols, speed_cols
 
 
 def floor_lookup_index(time_end_array, query_time):
@@ -72,10 +77,13 @@ def floor_lookup_index(time_end_array, query_time):
     return max(int(idx), 0)
 
 
-def build_signal_window(df, time_end_arr, angle_cols, t_next, urgency_std):
+def build_signal_window(df, time_end_arr, angle_cols, speed_cols, t_next,
+                        urgency_std, speed_std):
     """
-    Build a [F, 6, 4] signal window ending at t_next.
-    Features per (frame, dial): [sin(angle), cos(angle), urgency, distance]
+    Build a [F, 6, 5] signal window ending at t_next.
+    Features per (frame, dial):
+        [sin(angle), cos(angle), urgency, distance, speed_norm]
+    speed_norm = tanh(signed_angular_speed / speed_std) — negative means retreating
     """
     F = round(config.SIGNAL_LENGTH_S * config.SIGNAL_HZ)
     t_start = t_next - config.SIGNAL_LENGTH_S
@@ -84,25 +92,30 @@ def build_signal_window(df, time_end_arr, angle_cols, t_next, urgency_std):
     row_indices = [floor_lookup_index(time_end_arr, qt) for qt in query_times]
 
     positions = sorted(angle_cols.keys())
-    window = np.zeros((F, 6, 4), dtype=np.float32)
+    window = np.zeros((F, 6, 5), dtype=np.float32)
 
     for dial_slot, pos in enumerate(positions):
         col = angle_cols[pos]
         angles = df[col].values.astype(np.float64)
+        speed_col = speed_cols.get(pos)
+        speeds = df[speed_col].values.astype(np.float64) if speed_col else None
 
         for fi, row_idx in enumerate(row_indices):
-            angle = angles[row_idx]
+            angle    = angles[row_idx]
             norm_val = math.sqrt(max(2.0 - 2.0 * math.cos(angle), 0.0))
 
-            prev_idx = max(row_idx - 1, 0)
+            prev_idx  = max(row_idx - 1, 0)
             prev_norm = math.sqrt(max(2.0 - 2.0 * math.cos(angles[prev_idx]), 0.0))
-            raw_rate = max(prev_norm - norm_val, 0.0)
-            urgency  = math.tanh(raw_rate / (norm_val + URGENCY_EPS) / urgency_std)
+            raw_rate  = max(prev_norm - norm_val, 0.0)
+            urgency   = math.tanh(raw_rate / (norm_val + URGENCY_EPS) / urgency_std)
+
+            spd_norm = math.tanh(speeds[row_idx] / speed_std) if speeds is not None else 0.0
 
             window[fi, dial_slot, 0] = math.sin(angle)
             window[fi, dial_slot, 1] = math.cos(angle)
             window[fi, dial_slot, 2] = urgency
             window[fi, dial_slot, 3] = 1.0 - norm_val
+            window[fi, dial_slot, 4] = spd_norm
 
     return window
 
@@ -136,7 +149,7 @@ def verify_aoi_assignments(gt_df):
 def compute_urgency_std(train_videos):
     all_raw_rates = []
     for vnum in train_videos:
-        df, _, positions, angle_cols = load_signal_csv(vnum)
+        df, _, positions, angle_cols, _ = load_signal_csv(vnum)
         for pos in positions:
             col = angle_cols[pos]
             angles = df[col].values.astype(np.float64)
@@ -146,6 +159,19 @@ def compute_urgency_std(train_videos):
             urgency_raw = raw_rates / (norms + URGENCY_EPS)
             all_raw_rates.extend(urgency_raw.tolist())
     std = float(np.std(all_raw_rates))
+    return max(std, 1e-6)
+
+
+def compute_speed_std(train_videos):
+    all_speeds = []
+    for vnum in train_videos:
+        df, _, positions, _, speed_cols = load_signal_csv(vnum)
+        for pos in positions:
+            col = speed_cols.get(pos)
+            if col is None:
+                continue
+            all_speeds.extend(df[col].values.astype(np.float64).tolist())
+    std = float(np.std(all_speeds))
     return max(std, 1e-6)
 
 
@@ -183,7 +209,7 @@ def denorm_duration(val_norm, stats):
 
 # ── Main dataset builder ───────────────────────────────────────────────────────
 
-def build_samples_raw(gt_df, signal_data, urgency_std):
+def build_samples_raw(gt_df, signal_data, urgency_std, speed_std):
     """
     Build samples without temporal normalisation (raw saccade_s / duration_s).
     Temporal normalisation is applied after fitting stats on training split.
@@ -200,7 +226,7 @@ def build_samples_raw(gt_df, signal_data, urgency_std):
 
         if video not in signal_data:
             continue
-        df_sig, time_end_arr, angle_cols = signal_data[video]
+        df_sig, time_end_arr, angle_cols, speed_cols = signal_data[video]
 
         # Precompute saccade for every fixation in this trial
         saccade_list = [0.0] + [
@@ -219,8 +245,8 @@ def build_samples_raw(gt_df, signal_data, urgency_std):
             past_durations = durations[i - N: i]
             past_saccades  = saccade_list[i - N: i]
 
-            window = build_signal_window(df_sig, time_end_arr, angle_cols,
-                                         t_next, urgency_std)
+            window = build_signal_window(df_sig, time_end_arr, angle_cols, speed_cols,
+                                         t_next, urgency_std, speed_std)
 
             samples.append({
                 'past_aois':      past_aois,
@@ -248,22 +274,24 @@ def main():
 
     verify_aoi_assignments(gt_df)
 
-    print("Computing urgency_std from training videos...")
+    print("Computing urgency_std and speed_std from training videos...")
     urgency_std = compute_urgency_std(config.TRAIN_VIDEOS)
+    speed_std   = compute_speed_std(config.TRAIN_VIDEOS)
     print(f"  urgency_std = {urgency_std:.6f}")
+    print(f"  speed_std   = {speed_std:.6f}")
 
     print("Loading signal CSVs...")
     all_videos = sorted(gt_df['video'].unique())
     signal_data = {}
     for vnum in all_videos:
-        df, _, positions, angle_cols = load_signal_csv(vnum)
+        df, _, positions, angle_cols, speed_cols = load_signal_csv(vnum)
         time_end_arr = df['time_end'].values.astype(np.float64)
-        signal_data[vnum] = (df, time_end_arr, angle_cols)
+        signal_data[vnum] = (df, time_end_arr, angle_cols, speed_cols)
         print(f"  Video {vnum}: {len(df)} signal frames, "
               f"dials at positions {positions}")
 
     print("\nBuilding raw samples...")
-    samples = build_samples_raw(gt_df, signal_data, urgency_std)
+    samples = build_samples_raw(gt_df, signal_data, urgency_std, speed_std)
     print(f"  Total raw samples: {len(samples):,}")
 
     # Split
@@ -295,6 +323,7 @@ def main():
     payload = {
         'samples':        samples,
         'urgency_std':    urgency_std,
+        'speed_std':      speed_std,
         'temporal_stats': temporal_stats,
         'F':              round(config.SIGNAL_LENGTH_S * config.SIGNAL_HZ),
         'N':              config.PAST_FIXATIONS,
@@ -305,7 +334,7 @@ def main():
 
     # Save small metadata pkl (stats only — loaded by train/evaluate)
     import torch
-    meta = {'urgency_std': urgency_std, 'temporal_stats': temporal_stats}
+    meta = {'urgency_std': urgency_std, 'speed_std': speed_std, 'temporal_stats': temporal_stats}
     with open(config.META_PKL, 'wb') as f:
         pickle.dump(meta, f)
     print(f"Saved: {config.META_PKL}")
