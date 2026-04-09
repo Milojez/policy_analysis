@@ -8,14 +8,9 @@ import os
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# ── Data ──────────────────────────────────────────────────────────────────────
+# ── Raw data ───────────────────────────────────────────────────────────────────
 GT_CSV  = os.path.join(_ROOT, "data", "GT_all_fixation_noDial7_noPPs.csv")
 SIG_DIR = os.path.join(_ROOT, "data", "movie_signal_csv")
-DATA_PKL  = os.path.join(_ROOT, "data", "policy_dataset.pkl")   # full pkl (for visualize)
-TRAIN_PT  = os.path.join(_ROOT, "data", "policy_train.pt")
-VAL_PT    = os.path.join(_ROOT, "data", "policy_val.pt")
-TEST_PT   = os.path.join(_ROOT, "data", "policy_test.pt")
-META_PKL  = os.path.join(_ROOT, "data", "policy_meta.pkl")     # stats only (small)
 
 # Train: videos 1-5, Val: video 6, Test: video 7
 TRAIN_VIDEOS = [1, 2, 3, 4, 5]
@@ -35,49 +30,64 @@ AOI_BY_POSITION = {
 }
 
 # ── Signal sampling ───────────────────────────────────────────────────────────
-SIGNAL_LENGTH_S = 2   # seconds of signal history before next fixation
-SIGNAL_HZ       = 10    # evenly-spaced frames per second to extract
-# F = round(SIGNAL_LENGTH_S * SIGNAL_HZ) = 20 total frames per sample
-# number of frames per signal window after sampling
-SIGNAL_FRAMES = int(round(SIGNAL_LENGTH_S * SIGNAL_HZ))
+SIGNAL_LENGTH_S = 2     # seconds of signal history before next fixation
+SIGNAL_HZ       = 10   # evenly-spaced frames per second to extract
+SIGNAL_FRAMES   = int(round(SIGNAL_LENGTH_S * SIGNAL_HZ))  # = 20 frames
+
+# Future signal window (during predicted fixation) for temporal conditioning
+FUTURE_SIGNAL_S = 0.5
+FUTURE_FRAMES   = int(round(FUTURE_SIGNAL_S * SIGNAL_HZ))  # = 5 frames
+
 # ── Model ─────────────────────────────────────────────────────────────────────
 PAST_FIXATIONS = 2       # past fixation AOI labels fed to GRU
-STRIDE         = 1       # samples per (pp, video) advance by this many fixations
-                         # STRIDE=1 → consecutive samples share PAST_FIXATIONS-1 context fixations
-                         # STRIDE=PAST_FIXATIONS → no overlap (fully non-overlapping windows)
+STRIDE         = 1       # samples advance by this many fixations per step
 HIDDEN_DIM     = 64
 EMB_DIM        = 16      # AOI embedding dimension
 SIG_FEAT       = 5       # signal features per (dial, frame): sin, cos, urgency, distance, speed_norm
 
 # Ablation flags — set False to zero-out that branch (no rebuild needed)
-USE_FIXATIONS = True     # use past fixation AOI history
-USE_SIGNAL    = True     # use recent dial signal history
+USE_FIXATIONS = True
+USE_SIGNAL    = True
 
 # ── Regularisation ────────────────────────────────────────────────────────────
-DROPOUT = 0.2            # dropout probability in fusion MLP
-# Probability of zeroing out past_aois for a training sample (forces signal use)
-FIX_BRANCH_DROPOUT = 0.5
+DROPOUT = 0.2
+FIX_BRANCH_DROPOUT = 0.5   # prob of zeroing fixation branch (forces signal reliance)
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
-# Weight of temporal (saccade + duration) MSE loss vs dial CrossEntropy
 LAMBDA_TEMPORAL = 0.05
 
 # ── Training ──────────────────────────────────────────────────────────────────
-SEED         = 42
-EPOCHS       = 40
-BATCH_SIZE   = 256
-LR           = 1e-3
-LR_MIN       = 1e-5   # cosine annealing floor
-WARMUP_EPOCHS = 3     # linear warmup before cosine decay begins
-WEIGHT_DECAY = 1e-4
+SEED          = 42
+EPOCHS        = 40
+BATCH_SIZE    = 256
+LR            = 1e-3
+LR_MIN        = 1e-5
+WARMUP_EPOCHS = 3
+WEIGHT_DECAY  = 1e-4
 
-# ── Transformer ───────────────────────────────────────────────────────────
-NHEAD = 4
-FF_DIM = HIDDEN_DIM        # lean FFN — keeps transformer ~99k params at this data scale
-N_SIGNAL_LAYERS = 1        # one layer sufficient for cross-token interaction
+# ── Transformer ───────────────────────────────────────────────────────────────
+NHEAD           = 4
+FF_DIM          = HIDDEN_DIM
+N_SIGNAL_LAYERS = 1
+
+# ── Dataset paths — named after parameters that affect sample construction ────
+# Changing SIGNAL_LENGTH_S, PAST_FIXATIONS, STRIDE, SIGNAL_HZ, or FUTURE_SIGNAL_S
+# requires re-running build_dataset.py.
+DATASET_NAME       = (f"sl{SIGNAL_LENGTH_S}s"
+                      f"_pf{PAST_FIXATIONS}"
+                      f"_str{STRIDE}"
+                      f"_hz{SIGNAL_HZ}"
+                      f"_fut{FUTURE_SIGNAL_S}s")
+DATASETS_BUILT_DIR = os.path.join(_ROOT, "datasets_built", DATASET_NAME)
+
+DATA_PKL = os.path.join(DATASETS_BUILT_DIR, "policy_dataset.pkl")
+TRAIN_PT = os.path.join(DATASETS_BUILT_DIR, "policy_train.pt")
+VAL_PT   = os.path.join(DATASETS_BUILT_DIR, "policy_val.pt")
+TEST_PT  = os.path.join(DATASETS_BUILT_DIR, "policy_test.pt")
+META_PKL = os.path.join(DATASETS_BUILT_DIR, "policy_meta.pkl")
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
-MODEL_NAME = "policy_h64_n2_str1_fbd05_hz10"
+MODEL_NAME = "policy_sepdur_h64_n2_str1_fbd05_hz10"
 CKPT_DIR   = os.path.join(_ROOT, "checkpoints", MODEL_NAME)
 CKPT       = os.path.join(CKPT_DIR, "policy_best.pth")
 LOG_PATH   = os.path.join(CKPT_DIR, f"{MODEL_NAME}_log.csv")

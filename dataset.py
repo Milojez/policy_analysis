@@ -33,7 +33,7 @@ class PolicyDataset(Dataset):
         else:
             data = source
 
-        required = ["past_aois", "past_temporal", "signals", "labels", "temporal"]
+        required = ["past_aois", "past_temporal", "signals", "future_signals", "labels", "temporal"]
         missing = [k for k in required if k not in data]
         if missing:
             raise KeyError(
@@ -42,20 +42,22 @@ class PolicyDataset(Dataset):
                 f"Available keys: {list(data.keys())}"
             )
 
-        self.past_aois     = data["past_aois"]      # [M, N]
-        self.past_temporal = data["past_temporal"]  # [M, N, 2]
-        self.signals       = data["signals"]        # [M, F, 6, 4]
-        self.labels        = data["labels"]         # [M]
-        self.temporal      = data["temporal"]       # [M, 2]
+        self.past_aois      = data["past_aois"]       # [M, N]
+        self.past_temporal  = data["past_temporal"]  # [M, N, 2]
+        self.signals        = data["signals"]        # [M, F, 6, 5]
+        self.future_signals = data["future_signals"] # [M, F_future, 6, 5]
+        self.labels         = data["labels"]         # [M]
+        self.temporal       = data["temporal"]       # [M, 2]
 
     def __len__(self):
         return self.labels.size(0)
 
     def __getitem__(self, idx):
         return {
-            "past_aois":     self.past_aois[idx],
-            "past_temporal": self.past_temporal[idx],
-            "signal":        self.signals[idx],
-            "label":         self.labels[idx],
-            "temporal":      self.temporal[idx],
+            "past_aois":      self.past_aois[idx],
+            "past_temporal":  self.past_temporal[idx],
+            "signal":         self.signals[idx],
+            "future_signal":  self.future_signals[idx],
+            "label":          self.labels[idx],
+            "temporal":       self.temporal[idx],
         }

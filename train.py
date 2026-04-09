@@ -156,15 +156,18 @@ def main():
             pa      = batch['past_aois'].to(device)
             pt      = batch['past_temporal'].to(device)
             sig     = batch['signal'].to(device)
+            fut_sig = batch['future_signal'].to(device)
             lbl     = batch['label'].to(device)
             temp_gt = batch['temporal'].to(device)
 
             optimizer.zero_grad()
             sig = sig + 0.02 * torch.randn_like(sig)   # signal noise augmentation
-            logits, temp_pred = model(pa, sig, pt)
+            logits, temp_pred = model(pa, sig, pt, chosen_dial=lbl, future_signal=fut_sig)
 
             loss_dial = ce_loss(logits, lbl)
-            loss_temp = F.mse_loss(temp_pred, temp_gt)
+            mu        = temp_pred[:, :2]
+            sigma     = temp_pred[:, 2:].exp().clamp(min=1e-4)
+            loss_temp = F.gaussian_nll_loss(mu, temp_gt, sigma ** 2)
             loss = loss_dial + config.LAMBDA_TEMPORAL * loss_temp
 
             loss.backward()

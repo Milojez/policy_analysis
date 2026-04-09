@@ -134,7 +134,17 @@ class PolicyNet(nn.Module):
 
         # ── Output heads ────────────────────────────────────────────────────
         self.dial_head = nn.Linear(hidden, n_aoi)
-        self.temporal_head = nn.Linear(hidden, 2)
+
+        # Future signal encoder: mean-pool F_future frames → [B, 6*sig_feat] → hidden
+        self.future_sig_fc = nn.Sequential(
+            nn.Linear(6 * sig_feat, hidden),
+            nn.ReLU(),
+        )
+
+        # Temporal head conditioned on:
+        #   fused (hidden) + chosen dial embedding (emb_dim) + future signal (hidden)
+        # outputs [sacc_mu, dur_mu, sacc_log_sigma, dur_log_sigma]
+        self.temporal_head = nn.Linear(hidden + emb_dim + hidden, 4)
 
     def encode_fixations(self, past_aois, past_temporal):
         """
@@ -275,20 +285,27 @@ class PolicyNet(nn.Module):
 
         return h_sig
 
-    def forward(self, past_aois, signal, past_temporal, return_attention=False):
+    def forward(self, past_aois, signal, past_temporal,
+                chosen_dial=None, future_signal=None, return_attention=False):
         """
         past_aois:    [B, N]
         signal:       [B, F, 6, C]
         past_temporal:[B, N, 2]   — [duration_norm, saccade_norm] per past fixation
+        chosen_dial:  LongTensor [B] — 0-indexed chosen dial (for temporal conditioning)
+                      If None, uses pad embedding (zeros) — temporal head receives no dial signal.
+        future_signal:[B, F_future, 6, C] — signal during predicted fixation
+                      If None, zeros are used — temporal head receives no future context.
 
         returns by default:
             logits   [B, 6]
-            temporal [B, 2]
+            temporal [B, 4]  — [sacc_mu, dur_mu, sacc_log_sigma, dur_log_sigma]
 
         if return_attention=True:
-            logits, temporal, attn_map
-            where attn_map is [B, F, 6]
+            logits, temporal, attn_map  (attn_map: [B, F, 6])
         """
+        B      = past_aois.size(0)
+        device = past_aois.device
+
         h_fix = self.encode_fixations(past_aois, past_temporal)        # [B, H]
 
         if return_attention:
@@ -296,9 +313,30 @@ class PolicyNet(nn.Module):
         else:
             h_sig = self.encode_signal(signal, h_fix, return_attention=False)
 
-        fused = self.fusion(torch.cat([h_fix, h_sig], dim=-1))         # [B, H]
-        logits = self.dial_head(fused)                                 # [B, 6]
-        temporal = self.temporal_head(fused)                           # [B, 2]
+        fused  = self.fusion(torch.cat([h_fix, h_sig], dim=-1))        # [B, H]
+        logits = self.dial_head(fused)                                  # [B, 6]
+
+        # ── Temporal head: conditioned on chosen dial + future signal ────────
+        # Detach fused so NLL gradients don't flow back through the shared
+        # representation and interfere with dial head convergence.
+        fused = fused.detach()
+        # chosen dial embedding (1-indexed; 0 = pad/unknown)
+        if chosen_dial is None:
+            dial_ids = torch.zeros(B, dtype=torch.long, device=device)
+        else:
+            dial_ids = (chosen_dial + 1).clamp(0, self.n_aoi)          # 0-idx → 1-idx
+        chosen_e = self.aoi_emb(dial_ids)                               # [B, emb_dim]
+
+        # future signal: mean pool over F_future frames → [B, 6*C]
+        if future_signal is None:
+            fut_h = torch.zeros(B, self.hidden, device=device)
+        else:
+            fut_mean = future_signal.mean(dim=1)                        # [B, 6, C]
+            fut_h    = self.future_sig_fc(
+                fut_mean.reshape(B, -1))                                # [B, H]
+
+        temporal = self.temporal_head(
+            torch.cat([fused, chosen_e, fut_h], dim=-1))               # [B, 4]
 
         if return_attention:
             return logits, temporal, attn_map

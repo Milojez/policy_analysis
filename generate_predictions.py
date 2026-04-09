@@ -23,11 +23,13 @@ import pandas as pd
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "datasets_built"))
 
 import config
 from model import PolicyNet
 from build_dataset import (
     build_signal_window,
+    build_future_signal_window,
     load_signal_csv,
     denorm_saccade,
     denorm_duration,
@@ -95,13 +97,26 @@ def generate_scanpath(
         sig_t = torch.tensor(window[None], dtype=torch.float32, device=device)
 
         with torch.no_grad():
-            logits, temp_pred = model(pa_t, sig_t, pt_t)
+            logits, _ = model(pa_t, sig_t, pt_t)  # dial prediction only
 
         probs  = torch.softmax(logits[0], dim=-1)
         aoi_0  = int(torch.multinomial(probs, 1).item())
         aoi_1  = aoi_0 + 1                # 1-indexed dial position
 
-        sacc_norm, dur_norm = temp_pred[0].cpu().tolist()
+        # Temporal: conditioned on chosen dial + future 0.5s signal
+        future_window = build_future_signal_window(
+            df_sig, time_end_arr, angle_cols, speed_cols,
+            t_current, urgency_std, speed_std)
+        fut_t  = torch.tensor(future_window[None], dtype=torch.float32, device=device)
+        dial_t = torch.tensor([aoi_0], dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            _, temp_pred = model(pa_t, sig_t, pt_t,
+                                 chosen_dial=dial_t, future_signal=fut_t)
+
+        mu    = temp_pred[0, :2]
+        sigma = temp_pred[0, 2:].exp().clamp(min=1e-4)
+        sacc_norm, dur_norm = torch.normal(mu, sigma).cpu().tolist()
         saccade_s  = denorm_saccade(sacc_norm, temporal_stats)
         duration_s = denorm_duration(dur_norm, temporal_stats)
 
@@ -171,11 +186,12 @@ def main():
     print(f"  Participants in GT for video {TARGET_VIDEO}: {len(pps)}")
 
     # Generate one scanpath per participant
+    predictions_dir = os.path.join(config.RESULTS, "predictions")
     os.makedirs(config.RESULTS, exist_ok=True)
-    out_path = os.path.join(
-        config.RESULTS,
-        f"predicted_fixations_video{TARGET_VIDEO}.csv",
-    )
+    os.makedirs(predictions_dir, exist_ok=True)
+
+    filename      = f"predicted_fixations_video{TARGET_VIDEO}.csv"
+    out_path      = os.path.join(predictions_dir, filename)
 
     fieldnames = ["pp", "video", "dial", "t_begin_s", "t_mid_s", "t_end_s", "duration_s"]
 
